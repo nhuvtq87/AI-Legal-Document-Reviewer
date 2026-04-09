@@ -1,0 +1,5 @@
+{
+  "name": "AI Legal Document Reviewer",
+  "description": "A senior legal analyst tool that audits contracts for red flags, translates jargon into plain English, and provides actionable legal questions.",
+  "requestFramePermissions": []
+}
