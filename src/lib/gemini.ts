@@ -28,21 +28,25 @@ Output Format:
 - Risk Table: Columns for [Clause Name], [Risk Level: Low/Med/High], [The Jargon], and [Plain English Meaning].
 - Action Items: Recommended questions for the user to ask their legal counsel.`;
 
+export interface DocumentFile {
+  data: string;
+  mimeType: string;
+}
+
 export async function analyzeDocument(
-  fileData: string,
-  mimeType: string
+  files: DocumentFile[]
 ): Promise<AnalysisResult> {
   const model = "gemini-3.1-pro-preview";
 
-  const prompt = "Please analyze the attached legal document according to your system instructions.";
+  const prompt = "Please analyze the attached legal document(s) according to your system instructions. If multiple images are provided, they are pages of the same document.";
 
   const parts = [
-    {
+    ...files.map(file => ({
       inlineData: {
-        data: fileData,
-        mimeType: mimeType,
+        data: file.data,
+        mimeType: file.mimeType,
       },
-    },
+    })),
     { text: prompt },
   ];
 
@@ -94,8 +98,7 @@ export async function analyzeDocument(
 }
 
 export async function askQuestionAboutDocument(
-  fileData: string,
-  mimeType: string,
+  files: DocumentFile[],
   question: string,
   history: { role: "user" | "model"; parts: { text: string }[] }[] = []
 ): Promise<string> {
@@ -104,19 +107,19 @@ export async function askQuestionAboutDocument(
   const chat = ai.chats.create({
     model,
     config: {
-      systemInstruction: "You are a senior legal analyst. Answer questions about the provided legal document accurately and professionally. If the answer is not in the document, state that. Always include a disclaimer that this is not legal advice.",
+      systemInstruction: "You are a senior legal analyst. Answer questions about the provided legal document(s) accurately and professionally. If the answer is not in the document, state that. Always include a disclaimer that this is not legal advice.",
     },
     history: history,
   });
 
   const response = await chat.sendMessage({
     message: [
-      {
+      ...files.map(file => ({
         inlineData: {
-          data: fileData,
-          mimeType: mimeType,
+          data: file.data,
+          mimeType: file.mimeType,
         },
-      },
+      })),
       { text: question },
     ],
   });

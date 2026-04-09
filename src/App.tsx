@@ -15,7 +15,12 @@ import {
   ShieldAlert,
   ArrowRight,
   Download,
-  Scale
+  Scale,
+  Camera,
+  X,
+  Plus,
+  Trash2,
+  CameraOff
 } from "lucide-react";
 import mammoth from "mammoth";
 
@@ -26,19 +31,25 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { analyzeDocument, askQuestionAboutDocument, AnalysisResult, RiskItem } from "@/src/lib/gemini";
+import { analyzeDocument, askQuestionAboutDocument, AnalysisResult, RiskItem, DocumentFile } from "@/src/lib/gemini";
 import { cn } from "@/lib/utils";
 import { MessageSquare, Send } from "lucide-react";
 
 export default function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<DocumentFile[]>([]);
+  const [fileNames, setFileNames] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMessage, setLoadingMessage] = useState("Preparing document...");
   
+  // Camera State
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+
   // Q&A State
-  const [docContext, setDocContext] = useState<{ data: string; mimeType: string } | null>(null);
+  const [docContext, setDocContext] = useState<DocumentFile[] | null>(null);
   const [question, setQuestion] = useState("");
   const [isAsking, setIsAsking] = useState(false);
   const [chatHistory, setChatHistory] = useState<{ role: "user" | "model"; parts: { text: string }[] }[]>([]);
@@ -52,12 +63,78 @@ export default function App() {
     "Generating action items..."
   ];
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files) as File[];
+      const processedFiles: DocumentFile[] = [];
+      const names: string[] = [];
+
+      for (const f of newFiles) {
+        let base64Data = "";
+        let mimeType = f.type;
+
+        if (f.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+          base64Data = await processDocx(f);
+          mimeType = "text/plain";
+        } else {
+          base64Data = await fileToBase64(f);
+        }
+
+        processedFiles.push({ data: base64Data, mimeType });
+        names.push(f.name);
+      }
+
+      setFiles(prev => [...prev, ...processedFiles]);
+      setFileNames(prev => [...prev, ...names]);
       setError(null);
       setResult(null);
     }
+  };
+
+  const startCamera = async () => {
+    try {
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      setStream(mediaStream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+      }
+      setIsCameraOpen(true);
+    } catch (err) {
+      console.error("Camera error:", err);
+      setError("Could not access camera. Please check permissions.");
+    }
+  };
+
+  const stopCamera = () => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+    setIsCameraOpen(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      const canvas = document.createElement("canvas");
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0);
+        const base64Data = canvas.toDataURL("image/jpeg").split(",")[1];
+        const timestamp = new Date().toLocaleTimeString();
+        
+        setFiles(prev => [...prev, { data: base64Data, mimeType: "image/jpeg" }]);
+        setFileNames(prev => [...prev, `Captured at ${timestamp}.jpg`]);
+        setError(null);
+        setResult(null);
+      }
+    }
+  };
+
+  const removeFile = (index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
+    setFileNames(prev => prev.filter((_, i) => i !== index));
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -79,7 +156,7 @@ export default function App() {
   };
 
   const startAnalysis = async () => {
-    if (!file) return;
+    if (files.length === 0) return;
 
     setIsAnalyzing(true);
     setError(null);
@@ -91,25 +168,12 @@ export default function App() {
     }, 3000);
 
     try {
-      let base64Data = "";
-      let mimeType = file.type;
-
-      if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-        // Docx needs special handling if we want to send it as text, 
-        // but Gemini 3.1 Pro can handle PDF directly. 
-        // For Docx, we'll convert to text first for better reliability.
-        base64Data = await processDocx(file);
-        mimeType = "text/plain";
-      } else {
-        base64Data = await fileToBase64(file);
-      }
-
-      const analysis = await analyzeDocument(base64Data, mimeType);
+      const analysis = await analyzeDocument(files);
       setResult(analysis);
-      setDocContext({ data: base64Data, mimeType });
+      setDocContext(files);
     } catch (err) {
       console.error("Analysis error:", err);
-      setError("An error occurred during analysis. Please ensure the file is a valid PDF, TXT, or Docx document.");
+      setError("An error occurred during analysis. Please ensure the files are valid PDF, TXT, or Image documents.");
     } finally {
       clearInterval(messageInterval);
       setIsAnalyzing(false);
@@ -129,8 +193,7 @@ export default function App() {
 
     try {
       const answer = await askQuestionAboutDocument(
-        docContext.data,
-        docContext.mimeType,
+        docContext,
         userQuestion,
         chatHistory
       );
@@ -213,67 +276,138 @@ export default function App() {
               </p>
             </div>
 
-            <Card className="border-2 border-dashed border-muted-foreground/20 bg-white/50 hover:border-blue-500/50 transition-colors">
-              <CardContent className="pt-6">
-                <div className="flex flex-col items-center justify-center py-8 text-center">
-                  <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center mb-4">
-                    <Upload className="w-6 h-6 text-blue-600" />
+            <Card className="border-2 border-dashed border-muted-foreground/20 bg-white/50 hover:border-blue-500/50 transition-colors overflow-hidden">
+              <CardContent className="p-0">
+                {isCameraOpen ? (
+                  <div className="relative bg-black aspect-video flex items-center justify-center">
+                    <video 
+                      ref={videoRef} 
+                      autoPlay 
+                      playsInline 
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4">
+                      <Button 
+                        size="icon" 
+                        variant="destructive" 
+                        onClick={stopCamera}
+                        className="rounded-full w-12 h-12"
+                      >
+                        <X className="w-6 h-6" />
+                      </Button>
+                      <Button 
+                        size="icon" 
+                        onClick={capturePhoto}
+                        className="rounded-full w-16 h-16 bg-white text-black hover:bg-gray-200"
+                      >
+                        <div className="w-12 h-12 rounded-full border-4 border-black/10" />
+                      </Button>
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    <p className="font-medium">Drop your document here</p>
-                    <p className="text-xs text-muted-foreground">PDF, TXT, or DOCX up to 10MB</p>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-8 text-center px-6">
+                    <div className="flex gap-4 mb-4">
+                      <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center">
+                        <Upload className="w-6 h-6 text-blue-600" />
+                      </div>
+                      <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center">
+                        <Camera className="w-6 h-6 text-emerald-600" />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="font-medium">Upload or Capture Document</p>
+                      <p className="text-xs text-muted-foreground">PDF, Images, or DOCX</p>
+                    </div>
+                    <input
+                      type="file"
+                      id="file-upload"
+                      className="hidden"
+                      accept=".pdf,.txt,.docx,image/*"
+                      multiple
+                      onChange={handleFileChange}
+                    />
+                    <div className="flex gap-3 mt-6">
+                      <Button 
+                        variant="outline" 
+                        onClick={() => document.getElementById("file-upload")?.click()}
+                      >
+                        Select Files
+                      </Button>
+                      <Button 
+                        variant="outline"
+                        onClick={startCamera}
+                        className="border-emerald-200 hover:bg-emerald-50 text-emerald-700"
+                      >
+                        <Camera className="w-4 h-4 mr-2" />
+                        Take Photo
+                      </Button>
+                    </div>
                   </div>
-                  <input
-                    type="file"
-                    id="file-upload"
-                    className="hidden"
-                    accept=".pdf,.txt,.docx"
-                    onChange={handleFileChange}
-                  />
-                  <Button 
-                    variant="outline" 
-                    className="mt-6"
-                    onClick={() => document.getElementById("file-upload")?.click()}
-                  >
-                    Select File
-                  </Button>
-                </div>
+                )}
               </CardContent>
             </Card>
 
-            {file && (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center justify-between p-4 bg-white rounded-xl border shadow-sm"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-blue-50 rounded-lg">
-                    <FileText className="w-5 h-5 text-blue-600" />
-                  </div>
-                  <div className="overflow-hidden">
-                    <p className="text-sm font-medium truncate max-w-[150px]">{file.name}</p>
-                    <p className="text-xs text-muted-foreground">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                  </div>
+            {files.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Attached Files ({files.length})</h3>
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={() => { setFiles([]); setFileNames([]); }}
+                    className="text-xs text-red-600 hover:text-red-700 hover:bg-red-50"
+                  >
+                    Clear All
+                  </Button>
                 </div>
+                <ScrollArea className="max-h-[200px] pr-4">
+                  <div className="space-y-2">
+                    {fileNames.map((name, idx) => (
+                      <motion.div 
+                        key={idx}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="flex items-center justify-between p-3 bg-white rounded-xl border shadow-sm group"
+                      >
+                        <div className="flex items-center gap-3 overflow-hidden">
+                          <div className={cn(
+                            "p-2 rounded-lg shrink-0",
+                            files[idx].mimeType.startsWith("image/") ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
+                          )}>
+                            {files[idx].mimeType.startsWith("image/") ? <Camera className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                          </div>
+                          <p className="text-xs font-medium truncate">{name}</p>
+                        </div>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          onClick={() => removeFile(idx)}
+                          className="h-8 w-8 text-muted-foreground hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </motion.div>
+                    ))}
+                  </div>
+                </ScrollArea>
                 <Button 
                   disabled={isAnalyzing}
                   onClick={startAnalysis}
-                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white h-12"
                 >
                   {isAnalyzing ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Analyzing
+                      Analyzing {files.length} {files.length === 1 ? 'File' : 'Files'}
                     </>
                   ) : (
                     <>
-                      Audit Now
+                      Audit Document
                       <ArrowRight className="ml-2 h-4 w-4" />
                     </>
                   )}
                 </Button>
-              </motion.div>
+              </div>
             )}
 
             <Alert variant="destructive" className="bg-red-50 border-red-100 text-red-900">
